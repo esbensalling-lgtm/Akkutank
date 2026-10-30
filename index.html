@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="da">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Akkutank</title>
+<style>
+  :root { --bg:#0b0f14; --muted:#9aa4b2; --line:rgba(255,255,255,.07); --glass:rgba(255,255,255,.05); }
+  * { box-sizing:border-box; }
+  html { background:var(--bg); }
+  body { margin:0; min-height:100vh; color:#e8eaed; font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
+         background:radial-gradient(circle at 20% 0%,#22304d 0%,#111827 45%,var(--bg) 100%) fixed; }
+  main { max-width:1200px; margin:0 auto; padding:24px 16px 40px; display:grid; gap:20px;
+         grid-template-areas:"banner" "head" "tank" "g1" "g2"; }
+  @media (min-width:900px) { main { grid-template-columns:420px 1fr; grid-template-areas:"banner banner" "head head" "tank g1" "tank g2"; } }
+  header { grid-area:head; display:flex; justify-content:space-between; align-items:flex-end; gap:12px; flex-wrap:wrap; }
+  .kicker { font-size:13px; letter-spacing:3px; color:var(--muted); }
+  h1 { margin:2px 0 0; font-size:28px; }
+  .stats { display:flex; gap:10px; }
+  .stat { background:var(--glass); border:1px solid var(--line); border-radius:16px; padding:8px 14px; text-align:right; white-space:nowrap; }
+  .stat small { display:block; font-size:11px; letter-spacing:2px; color:var(--muted); }
+  .stat b { font-size:22px; } .stat span { font-size:13px; color:var(--muted); }
+  .panel { background:var(--glass); border:1px solid var(--line); border-radius:24px; padding:16px; }
+  #tank { grid-area:tank; display:flex; flex-direction:column; justify-content:center; }
+  #g1 { grid-area:g1; } #g2 { grid-area:g2; }
+  .panel h2 { margin:0 0 8px; font-size:15px; font-weight:600; }
+  .legend { display:flex; gap:14px; font-size:13px; color:var(--muted); margin-bottom:4px; }
+  .legend i { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; }
+  .status { text-align:center; color:var(--muted); font-size:13px; margin-top:6px; }
+  .banner { grid-area:banner; background:rgba(255,193,7,.12); border:1px solid rgba(255,193,7,.35); color:#ffd54f;
+            border-radius:14px; padding:10px 14px; font-size:14px; }
+  svg text { font-family:inherit; }
+</style>
+</head>
+<body>
+<main>
+  <div id="banner" class="banner" hidden></div>
+  <header>
+    <div><div class="kicker">AKKUMULERINGSTANK</div><h1>1500 L</h1></div>
+    <div class="stats">
+      <div class="stat"><small>ENERGI</small><b id="energi" style="color:#ffb74d">–</b><span> kWh</span></div>
+      <div class="stat"><small>GNS.</small><b id="gns">–</b><span> °C</span></div>
+    </div>
+  </header>
+  <section id="tank" class="panel"><div id="tanksvg"></div><div id="status" class="status">Henter data…</div></section>
+  <section id="g1" class="panel">
+    <h2>Lagdeling – sidste døgn</h2>
+    <div class="legend"><span><i style="background:#ff5252"></i>Top</span><span><i style="background:#ffab40"></i>Midt</span><span><i style="background:#40c4ff"></i>Bund</span></div>
+    <div id="chart1"></div>
+  </section>
+  <section id="g2" class="panel">
+    <h2>Varme i tanken – 7 dage</h2>
+    <div id="chart2"></div>
+  </section>
+</main>
+
+<script>
+/* ===== Indstillinger ===== */
+const KANAL = "";            // <-- skriv dit ThingSpeak kanal-ID her, fx "2712345"
+const REF_TEMP = 30;         // energi regnes over denne temperatur
+/* ========================= */
+
+const kanal = new URLSearchParams(location.search).get("kanal") || KANAL;
+const API = "https://api.thingspeak.com/channels/";
+const stops = [[20,[41,121,255]],[40,[0,188,212]],[55,[255,193,7]],[70,[255,109,0]],[85,[255,23,68]]];
+
+function col(t) {
+  if (t === null || t === undefined) return "rgb(96,125,139)";
+  if (t <= stops[0][0]) return `rgb(${stops[0][1]})`;
+  for (let i = 1; i < stops.length; i++) if (t <= stops[i][0]) {
+    const [t0,c0] = stops[i-1], [t1,c1] = stops[i], f = (t-t0)/(t1-t0);
+    return `rgb(${c0.map((c,k)=>Math.round(c+(c1[k]-c)*f)).join(",")})`;
+  }
+  return `rgb(${stops[stops.length-1][1]})`;
+}
+const num = (x) => { const n = parseFloat(x); return isNaN(n) ? null : n; };
+
+/* ---------- 3D-tank ---------- */
+function tankSVG(T, M, B, dT, dM, dB) {
+  const pil = (d) => {
+    if (d === null) return "";
+    if (Math.abs(d) < 0.3) return `<tspan fill="#9aa4b2">→ 0</tspan><tspan fill="#9aa4b2"> °C/t</tspan>`;
+    return (d > 0 ? `<tspan fill="#ff8a65">▲ ${d.toFixed(1)}</tspan>` : `<tspan fill="#4fc3f7">▼ ${Math.abs(d).toFixed(1)}</tspan>`) + `<tspan fill="#9aa4b2"> °C/t</tspan>`;
+  };
+  const txt = (t) => t === null ? "–" : t.toFixed(1) + "°";
+  const cT = col(T), cM = col(M), cB = col(B);
+  const x0 = 50, x1 = 210, cx = 130, rx = 80, ry = 20, yT = 70, yB = 380;
+  const body = `M${x0},${yT} L${x0},${yB} A${rx},${ry} 0 0 0 ${x1},${yB} L${x1},${yT} Z`;
+  const maal = (y, t, d, navn) => `
+    <line x1="${x1-6}" y1="${y}" x2="${x1+22}" y2="${y}" stroke="rgba(255,255,255,.35)" stroke-width="1.5"/>
+    <circle cx="${x1-6}" cy="${y}" r="5" fill="${col(t)}" stroke="white" stroke-width="2" filter="url(#glow)"/>
+    <text x="${x1+28}" y="${y-14}" font-size="12" fill="#9aa4b2" letter-spacing="1.5">${navn}</text>
+    <text x="${x1+28}" y="${y+12}" font-size="28" font-weight="700" fill="${col(t)}">${txt(t)}</text>
+    <text x="${x1+28}" y="${y+30}" font-size="12" font-weight="600">${pil(d)}</text>`;
+  return `
+  <svg viewBox="0 0 350 440" width="100%" style="max-width:400px;display:block;margin:auto">
+    <defs>
+      <linearGradient id="vaeske" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${cT}"/><stop offset=".5" stop-color="${cM}"/><stop offset="1" stop-color="${cB}"/></linearGradient>
+      <linearGradient id="skygge" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0" stop-color="#000" stop-opacity=".55"/><stop offset=".22" stop-color="#fff" stop-opacity=".18"/>
+        <stop offset=".32" stop-color="#fff" stop-opacity=".05"/><stop offset=".7" stop-color="#000" stop-opacity=".15"/>
+        <stop offset="1" stop-color="#000" stop-opacity=".65"/></linearGradient>
+      <radialGradient id="aura" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="${cM}" stop-opacity=".45"/><stop offset="1" stop-color="${cM}" stop-opacity="0"/></radialGradient>
+      <radialGradient id="laag" cx=".35" cy=".4" r=".8"><stop offset="0" stop-color="#fff" stop-opacity=".55"/><stop offset="1" stop-color="${cT}" stop-opacity="0"/></radialGradient>
+      <filter id="glow" x="-1" y="-1" width="3" height="3"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      <filter id="blur"><feGaussianBlur stdDeviation="8"/></filter>
+    </defs>
+    <ellipse cx="${cx}" cy="230" rx="140" ry="200" fill="url(#aura)"/>
+    <ellipse cx="${cx}" cy="${yB+28}" rx="${rx+10}" ry="12" fill="#000" opacity=".55" filter="url(#blur)"/>
+    <path d="${body}" fill="url(#vaeske)"/><path d="${body}" fill="url(#skygge)"/>
+    <path d="M${x0},173 A${rx},${ry} 0 0 0 ${x1},173 M${x0},276 A${rx},${ry} 0 0 0 ${x1},276" fill="none" stroke="rgba(255,255,255,.18)" stroke-width="1.5"/>
+    <rect x="${x0+26}" y="${yT+30}" width="9" height="${yB-yT-50}" rx="4.5" fill="#fff" opacity=".22"/>
+    <ellipse cx="${cx}" cy="${yT}" rx="${rx}" ry="${ry}" fill="${cT}"/>
+    <ellipse cx="${cx}" cy="${yT}" rx="${rx}" ry="${ry}" fill="url(#laag)"/>
+    <ellipse cx="${cx}" cy="${yT}" rx="${rx}" ry="${ry}" fill="none" stroke="rgba(255,255,255,.6)" stroke-width="2"/>
+    <path d="M${x0},${yT} L${x0},${yB} A${rx},${ry} 0 0 0 ${x1},${yB} L${x1},${yT}" fill="none" stroke="rgba(255,255,255,.45)" stroke-width="2"/>
+    ${maal(118, T, dT, "TOP")}${maal(225, M, dM, "MIDT")}${maal(332, B, dB, "BUND")}
+  </svg>`;
+}
+
+/* ---------- Graf ---------- */
+let gid = 0;
+function chartSVG(series, { spanMs, heat = false, xfmt, W = 700 }) {
+  const H = W < 500 ? 200 : 240, L = 36, R = 10, Tp = 10, Bt = 26, id = "g" + (gid++);
+  const all = series.flatMap(s => s.points.map(p => p[1]));
+  if (!all.length) return `<div class="status">Ingen data endnu</div>`;
+  const end = Date.now(), start = end - spanMs;
+  let lo = Math.floor((Math.min(...all) - 3) / 10) * 10, hi = Math.ceil((Math.max(...all) + 3) / 10) * 10;
+  if (hi - lo < 20) hi = lo + 20;
+  const X = (t) => L + (t - start) / spanMs * (W - L - R);
+  const Y = (v) => Tp + (hi - v) / (hi - lo) * (H - Tp - Bt);
+  let g = "";
+  for (let v = lo; v <= hi; v += 10) g += `<line x1="${L}" x2="${W-R}" y1="${Y(v)}" y2="${Y(v)}" stroke="rgba(255,255,255,.07)"/><text x="${L-6}" y="${Y(v)+4}" font-size="11" fill="#9aa4b2" text-anchor="end">${v}°</text>`;
+  const ticks = xfmt.ticks(start, end);
+  for (const t of ticks) g += `<text x="${X(t)}" y="${H-6}" font-size="11" fill="#9aa4b2" text-anchor="middle">${xfmt.label(t)}</text>`;
+  let defs = "", paths = "";
+  series.forEach((s, i) => {
+    const pts = s.points.filter(p => p[0] >= start);
+    if (pts.length < 2) return;
+    // del linjen op, hvis der mangler data i mere end 20 min
+    const segs = []; let cur = [];
+    pts.forEach((p, k) => { if (k && p[0] - pts[k-1][0] > Math.max(20*60e3, spanMs/100)) { segs.push(cur); cur = []; } cur.push(p); });
+    segs.push(cur);
+    const stroke = heat ? `url(#${id}h)` : s.color;
+    if (!heat) defs += `<linearGradient id="${id}a${i}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${s.color}" stop-opacity=".3"/><stop offset="1" stop-color="${s.color}" stop-opacity="0"/></linearGradient>`;
+    for (const seg of segs) {
+      if (seg.length < 2) continue;
+      const line = seg.map((p, k) => `${k ? "L" : "M"}${X(p[0]).toFixed(1)},${Y(p[1]).toFixed(1)}`).join("");
+      if (!heat) paths += `<path d="${line}L${X(seg[seg.length-1][0]).toFixed(1)},${H-Bt}L${X(seg[0][0]).toFixed(1)},${H-Bt}Z" fill="url(#${id}a${i})"/>`;
+      paths += `<path d="${line}" fill="none" stroke="${stroke}" stroke-width="${heat ? 4 : 2.5}" stroke-linejoin="round" stroke-linecap="round"/>`;
+    }
+  });
+  if (heat) {
+    defs += `<linearGradient id="${id}h" gradientUnits="userSpaceOnUse" x1="0" x2="0" y1="${Y(hi)}" y2="${Y(lo)}">` +
+      [hi, ...[85,70,55,40,20].filter(t => t < hi && t > lo), lo].map(t => `<stop offset="${((hi - t) / (hi - lo)).toFixed(3)}" stop-color="${col(t)}"/>`).join("") + `</linearGradient>`;
+  }
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block"><defs>${defs}</defs>${g}${paths}</svg>`;
+}
+const fmtTime = { ticks: (s, e) => { const r = []; const d = new Date(s); d.setMinutes(0,0,0); d.setHours(Math.ceil(d.getHours()/6)*6); for (; d.getTime() < e; d.setHours(d.getHours()+6)) if (d.getTime() > s) r.push(d.getTime()); return r; },
+                  label: (t) => new Date(t).toLocaleTimeString("da-DK", { hour:"2-digit", minute:"2-digit" }) };
+const fmtDay  = { ticks: (s, e) => { const r = []; const d = new Date(s); d.setHours(12,0,0,0); if (d.getTime() < s) d.setDate(d.getDate()+1); for (; d.getTime() < e; d.setDate(d.getDate()+1)) r.push(d.getTime()); return r; },
+                  label: (t) => new Date(t).toLocaleDateString("da-DK", { weekday:"short" }) };
+
+/* ---------- Data ---------- */
+function rows(feeds) {
+  return feeds.map(f => ({ t: Date.parse(f.created_at), top: num(f.field1), midt: num(f.field2), bund: num(f.field3), gns: num(f.field4), energi: num(f.field5) }))
+              .filter(r => !isNaN(r.t)).sort((a, b) => a.t - b.t);
+}
+function demoData() {
+  const now = Date.now(), d24 = [], d7 = [];
+  const sim = (t) => { const h = t / 3600e3, fyr = (1 + Math.sin(h / 24 * 2 * Math.PI)) / 2;
+    const top = 62 + 18 * fyr + 3 * Math.sin(h / 3); return { top, midt: top - 14 - 6 * fyr, bund: top - 32 - 4 * fyr }; };
+  for (let t = now - 864e5; t <= now; t += 60e3) { const s = sim(t); d24.push({ t, ...s }); }
+  for (let t = now - 7 * 864e5; t <= now; t += 30 * 60e3) { const s = sim(t); d7.push({ t, gns: (s.top + s.midt + s.bund) / 3 }); }
+  return { d24, d7 };
+}
+function trend(d, key) {
+  const last = [...d].reverse().find(r => r[key] !== null); if (!last) return null;
+  const ref = [...d].reverse().find(r => r[key] !== null && last.t - r.t >= 14 * 60e3); if (!ref) return null;
+  return (last[key] - ref[key]) / ((last.t - ref.t) / 3600e3);
+}
+
+async function load() {
+  let d24, d7, demo = !kanal;
+  if (demo) ({ d24, d7 } = demoData());
+  else {
+    try {
+      const [a, b] = await Promise.all([
+        fetch(`${API}${encodeURIComponent(kanal)}/feeds.json?minutes=1440`).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); }),
+        fetch(`${API}${encodeURIComponent(kanal)}/feeds.json?days=7&average=30`).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+      ]);
+      if (a === -1 || b === -1) throw new Error("Kanalen er ikke offentlig");
+      d24 = rows(a.feeds || []); d7 = rows(b.feeds || []);
+    } catch (e) {
+      document.getElementById("status").textContent = "Kunne ikke hente data (" + e.message + "). Prøver igen om lidt…";
+      return;
+    }
+  }
+  const banner = document.getElementById("banner");
+  banner.hidden = !demo;
+  if (demo) banner.textContent = "Demo-visning med opdigtede tal. Skriv dit ThingSpeak kanal-ID i KANAL øverst i filen, eller tilføj ?kanal=DITID til adressen.";
+
+  const lastOf = (k) => { const r = [...d24].reverse().find(r => r[k] !== null); return r ? r[k] : null; };
+  const T = lastOf("top"), M = lastOf("midt"), B = lastOf("bund");
+  const vals = [T, M, B].filter(v => v !== null);
+  const G = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+  const E = G === null ? null : Math.max(0, G - REF_TEMP) * 1500 * 4.186 / 3600;
+  document.getElementById("gns").textContent = G === null ? "–" : G.toFixed(1);
+  document.getElementById("energi").textContent = E === null ? "–" : E.toFixed(1);
+  document.getElementById("tanksvg").innerHTML = tankSVG(T, M, B, trend(d24, "top"), trend(d24, "midt"), trend(d24, "bund"));
+
+  const lastT = d24.length ? d24[d24.length - 1].t : null;
+  const min = lastT ? Math.round((Date.now() - lastT) / 60e3) : null;
+  document.getElementById("status").textContent = lastT === null ? "Ingen data endnu" :
+    (min < 1 ? "Opdateret lige nu" : `Opdateret for ${min} min siden`) + (min > 10 ? " – Home Assistant sender ikke?" : "");
+
+  document.getElementById("chart1").innerHTML = chartSVG([
+    { color: "#ff5252", points: d24.filter(r => r.top !== null).map(r => [r.t, r.top]) },
+    { color: "#ffab40", points: d24.filter(r => r.midt !== null).map(r => [r.t, r.midt]) },
+    { color: "#40c4ff", points: d24.filter(r => r.bund !== null).map(r => [r.t, r.bund]) }
+  ], { spanMs: 864e5, xfmt: fmtTime, W: document.getElementById("chart1").clientWidth || 700 });
+  document.getElementById("chart2").innerHTML = chartSVG([
+    { points: d7.filter(r => r.gns !== null).map(r => [r.t, r.gns]) }
+  ], { spanMs: 7 * 864e5, heat: true, xfmt: fmtDay, W: document.getElementById("chart2").clientWidth || 700 });
+}
+load();
+setInterval(load, 60e3);
+let rz; addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(load, 300); });
+</script>
+</body>
+</html>
